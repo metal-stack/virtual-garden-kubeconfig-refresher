@@ -76,7 +76,6 @@ func run(log *slog.Logger) error {
 	defer cancel()
 
 	log.Info("start refreshing kubeconfig", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath, "refresh-interval", refreshInterval.String())
-	ticker := time.NewTicker(refreshInterval)
 
 	refresh := func() error {
 		gc, err := getGardenClusterClient(ctx, log)
@@ -122,6 +121,13 @@ func run(log *slog.Logger) error {
 	if err := refresh(); err != nil {
 		return err
 	}
+
+	if refreshInterval == 0 {
+		log.Info("refresh interval is set to zero, task completed")
+		return nil
+	}
+
+	ticker := time.NewTicker(refreshInterval)
 
 	for {
 		select {
