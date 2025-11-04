@@ -31,6 +31,20 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v5
 
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
+
+    - name: Lint
+      uses: golangci/golangci-lint-action@v8
+      with:
+        args: --timeout=5m
+
+    - name: Build
+      run: |
+        make
+
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v5
