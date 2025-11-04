@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	configlatest "k8s.io/client-go/tools/clientcmd/api/latest"
@@ -124,13 +125,8 @@ func run(log *slog.Logger) error {
 
 		log.Info("resulting kubeconfig works")
 
-		if kubeconfigPath := os.Getenv("KUBECONFIG"); kubeconfigPath != "" {
+		if cfg, err := rest.InClusterConfig(); err == nil {
 			log.Info("detected running in kubernetes, writing back secret", "name", secretName, "namespace", namespace)
-
-			cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
-			if err != nil {
-				return fmt.Errorf("unable to create kubeconfig: %w", err)
-			}
 
 			c, err = client.New(cfg, client.Options{})
 			if err != nil {
