@@ -13,6 +13,7 @@ import (
 	"connectrpc.com/connect"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +49,14 @@ var (
 		}
 		return "kubeconfig"
 	}()
+
+	secretName = func() string {
+		if name := os.Getenv("SECRET_NAME"); name != "" {
+			return name
+		}
+		return "virtual-garden-kubeconfig"
+	}()
+	namespace = os.Getenv("NAMESPACE")
 
 	refreshInterval = func() time.Duration {
 		if intervalRaw := os.Getenv("REFRESH_INTERVAL"); intervalRaw != "" {
@@ -113,7 +122,43 @@ func run(log *slog.Logger) error {
 			return fmt.Errorf("resulting kubeconfig does not work for listing secrets: %w", err)
 		}
 
-		log.Info("resulting kubeconfig works, waiting for next refresh intrerval")
+		log.Info("resulting kubeconfig works")
+
+		if kubeconfigPath := os.Getenv("KUBECONFIG"); kubeconfigPath != "" {
+			log.Info("detected running in kubernetes, writing back secret", "name", secretName, "namespace", namespace)
+
+			cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+			if err != nil {
+				return fmt.Errorf("unable to create kubeconfig: %w", err)
+			}
+
+			c, err = client.New(cfg, client.Options{})
+			if err != nil {
+				return fmt.Errorf("unable to create client to write back secret: %w", err)
+			}
+
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secretName,
+					Namespace: namespace,
+				},
+			}
+
+			_, err = controllerutil.CreateOrUpdate(ctx, c, secret, func() error {
+				secret.StringData = map[string]string{
+					"kubeconfig": vgc.kubeconfig,
+					"token":      vgc.token,
+				}
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("unable to write back secret: %w", err)
+			}
+
+			log.Info("kubeconfig successfully written to kubernetes secret", "name", secretName, "namespace", namespace)
+		}
+
+		log.Info("waiting for next refresh intrerval")
 
 		return nil
 	}
