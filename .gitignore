@@ -1,0 +1,9 @@
+bin
+vendor
+.idea
+.vscode
+generate
+coverage.out
+__debug_bin
+kubeconfig
+token

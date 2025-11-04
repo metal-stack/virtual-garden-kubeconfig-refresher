@@ -1,0 +1,352 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"time"
+
+	"connectrpc.com/connect"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	configlatest "k8s.io/client-go/tools/clientcmd/api/latest"
+	configv1 "k8s.io/client-go/tools/clientcmd/api/v1"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	apiv1 "github.com/metal-stack-cloud/api/go/api/v1"
+	mscclient "github.com/metal-stack-cloud/api/go/client"
+
+	gcpv1 "cloud.google.com/go/container/apiv1"
+	"cloud.google.com/go/container/apiv1/containerpb"
+
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
+)
+
+var (
+	tokenFilePath = func() string {
+		if path := os.Getenv("TOKEN_FILE_PATH"); path != "" {
+			return path
+		}
+		return "token"
+	}()
+	kubeconfigFilePath = func() string {
+		if path := os.Getenv("KUBECONFIG_FILE_PATH"); path != "" {
+			return path
+		}
+		return "kubeconfig"
+	}()
+
+	refreshInterval = func() time.Duration {
+		if intervalRaw := os.Getenv("REFRESH_INTERVAL"); intervalRaw != "" {
+			d, err := time.ParseDuration(intervalRaw)
+			if err != nil {
+				panic(err)
+			}
+
+			return d
+		}
+		return 4 * time.Hour
+	}()
+)
+
+func main() {
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	if err := run(log); err != nil {
+		log.Error("error during runtime", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(log *slog.Logger) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+	defer cancel()
+
+	log.Info("start refreshing kubeconfig", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath, "refresh-interval", refreshInterval.String())
+	ticker := time.NewTicker(refreshInterval)
+
+	refresh := func() error {
+		gc, err := getGardenClusterClient(ctx, log)
+		if err != nil {
+			return fmt.Errorf("unable to retrieve garden cluster client: %w", err)
+		}
+
+		vgc, err := getVirtualGardenClient(ctx, gc)
+		if err != nil {
+			return fmt.Errorf("unable to retrieve virtual garden cluster client: %w", err)
+		}
+
+		if err := os.WriteFile(kubeconfigFilePath, []byte(vgc.kubeconfig), 0600); err != nil {
+			return fmt.Errorf("unable to write kubeconfig: %w", err)
+		}
+		if err := os.WriteFile(tokenFilePath, []byte(vgc.token), 0600); err != nil {
+			return fmt.Errorf("unable to write token: %w", err)
+		}
+
+		log.Info("written files", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath)
+
+		config, err := clientcmd.BuildConfigFromFlags("", kubeconfigFilePath)
+		if err != nil {
+			return fmt.Errorf("unable to build config: %w", err)
+		}
+
+		c, err := client.New(config, client.Options{})
+		if err != nil {
+			return fmt.Errorf("unable to create virtual garden client: %w", err)
+		}
+
+		var secretList corev1.SecretList
+		err = c.List(ctx, &secretList)
+		if err != nil {
+			return fmt.Errorf("resulting kubeconfig does not work for listing secrets: %w", err)
+		}
+
+		log.Info("resulting kubeconfig works, waiting for next refresh intrerval")
+
+		return nil
+	}
+
+	if err := refresh(); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("retrieved signal, exiting...")
+			return nil
+		case <-ticker.C:
+			log.Info("start refreshing kubeconfig after ticker interval")
+
+			if err := refresh(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func getGardenClusterClient(ctx context.Context, log *slog.Logger) (client.Client, error) {
+	switch {
+	case os.Getenv("METAL_STACK_CLOUD_API_TOKEN") != "":
+		log.Info("using metalstack.cloud garden cluster")
+		return fromMetalStackCloud(ctx)
+	case os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "":
+		log.Info("using GKE garden cluster")
+		return fromGCP(ctx)
+	default:
+		return nil, fmt.Errorf("either METAL_STACK_CLOUD_API_TOKEN or GOOGLE_APPLICATION_CREDENTIALS must be provided")
+	}
+}
+
+func fromMetalStackCloud(ctx context.Context) (client.Client, error) {
+	var (
+		token   = os.Getenv("METAL_STACK_CLOUD_API_TOKEN")
+		project = os.Getenv("METAL_STACK_CLOUD_PROJECT_ID")
+		cluster = os.Getenv("METAL_STACK_CLOUD_CLUSTER_ID")
+	)
+
+	if token == "" || project == "" || cluster == "" {
+		return nil, fmt.Errorf("METAL_STACK_CLOUD_API_TOKEN, METAL_STACK_CLOUD_PROJECT_ID and METAL_STACK_CLOUD_CLUSTER_ID must be given")
+	}
+
+	c := mscclient.New(mscclient.DialConfig{
+		BaseURL: "https://api.metalstack.cloud",
+		Token:   token,
+	})
+
+	resp, err := c.Apiv1().Cluster().GetCredentials(ctx, connect.NewRequest(&apiv1.ClusterServiceGetCredentialsRequest{
+		Project: project,
+		Uuid:    cluster,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve cluster credentials: %w", err)
+	}
+
+	clientCfg, err := clientcmd.NewClientConfigFromBytes([]byte(resp.Msg.GetKubeconfig()))
+	if err != nil {
+		return nil, err
+	}
+
+	rest, err := clientCfg.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	return client.New(rest, client.Options{})
+}
+
+func fromGCP(ctx context.Context) (client.Client, error) {
+	var (
+		project  = os.Getenv("GOOGLE_PROJECT_ID")
+		location = os.Getenv("GOOGLE_LOCATION")
+		name     = os.Getenv("GOOGLE_CLUSTER_NAME")
+	)
+
+	if location == "" || project == "" || name == "" {
+		return nil, fmt.Errorf("GOOGLE_PROJECT_ID, GOOGLE_LOCATION and GOOGLE_CLUSTER_NAME must be given")
+	}
+
+	c, err := gcpv1.NewClusterManagerRESTClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create google client: %w", err)
+	}
+
+	cluster, err := c.GetCluster(ctx, &containerpb.GetClusterRequest{
+		Name: fmt.Sprintf("projects/%s/locations/%s/clusters/%s", project, location, name),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve cluster: %w", err)
+	}
+
+	cert, err := base64.StdEncoding.DecodeString(cluster.GetMasterAuth().ClusterCaCertificate)
+	if err != nil {
+		return nil, fmt.Errorf("unable to decode ca cert: %w", err)
+	}
+
+	kubeconfig := &clientcmdapi.Config{
+		Clusters: map[string]*clientcmdapi.Cluster{
+			name: {
+				Server:                   "https://" + cluster.GetEndpoint(),
+				CertificateAuthorityData: cert,
+			},
+		},
+		Contexts: map[string]*clientcmdapi.Context{
+			name: {
+				Cluster:  name,
+				AuthInfo: name,
+			},
+		},
+		CurrentContext: name,
+		AuthInfos: map[string]*clientcmdapi.AuthInfo{
+			name: {},
+		},
+	}
+
+	kubeconfigRaw, err := runtime.Encode(configlatest.Codec, kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("unable to encode kubeconfig: %w", err)
+	}
+
+	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigRaw)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create rest config: %w", err)
+	}
+
+	config.AuthProvider = &clientcmdapi.AuthProviderConfig{Name: googleAuthPlugin}
+
+	return client.New(config, client.Options{})
+}
+
+type virtualGardenClient struct {
+	kubeconfig string
+	token      string
+}
+
+func getVirtualGardenClient(ctx context.Context, gardenClient client.Client) (*virtualGardenClient, error) {
+	virtualGardenTokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shoot-access-virtual-garden",
+			Namespace: "garden",
+		},
+	}
+	err := gardenClient.Get(ctx, client.ObjectKeyFromObject(virtualGardenTokenSecret), virtualGardenTokenSecret)
+	if err != nil {
+		return nil, fmt.Errorf("no garden kubeconfig found for accessing virtual garden: %w", err)
+	}
+
+	var genericSecrets corev1.SecretList
+	err = gardenClient.List(context.Background(), &genericSecrets, client.MatchingLabels{
+		"managed-by":       "secrets-manager",
+		"manager-identity": "gardener-operator",
+		"name":             "generic-token-kubeconfig",
+	}, client.InNamespace("garden"))
+	if err != nil {
+		return nil, fmt.Errorf("unable to list secrets: %w", err)
+	}
+
+	var genericSecret *corev1.Secret
+	for _, secret := range genericSecrets.Items {
+		if genericSecret == nil {
+			genericSecret = &secret
+		} else if genericSecret.Labels["issued-at-time"] < secret.Labels["issued-at-time"] {
+			genericSecret = &secret
+		}
+	}
+
+	if genericSecret == nil {
+		return nil, fmt.Errorf("no generic kubeconfig secret found for accessing virtual garden: %w", err)
+	}
+
+	gardenObjs := &unstructured.UnstructuredList{}
+	gardenObjs.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "operator.gardener.cloud",
+		Kind:    "GardenList",
+		Version: "v1alpha1",
+	})
+
+	err = gardenClient.List(ctx, gardenObjs)
+	if err != nil {
+		return nil, fmt.Errorf("unable to list garden resources: %w", err)
+	}
+
+	if len(gardenObjs.Items) == 0 {
+		return nil, fmt.Errorf("no garden resource found")
+	}
+
+	type garden struct {
+		Spec struct {
+			VirtualCluster struct {
+				Dns struct {
+					Domains []struct {
+						Name string `json:"name"`
+					} `json:"domains"`
+				} `json:"dns"`
+			} `json:"virtualCluster"`
+		} `json:"spec"`
+	}
+
+	gardenRaw, err := json.Marshal(gardenObjs.Items[0].Object)
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal gardener object: %w", err)
+	}
+
+	var gardenResource *garden
+	err = json.Unmarshal(gardenRaw, &gardenResource)
+	if err != nil {
+		return nil, fmt.Errorf("unable to unmarshal gardener object: %w", err)
+	}
+
+	kubeconfig := &configv1.Config{}
+	err = runtime.DecodeInto(configlatest.Codec, genericSecret.Data["kubeconfig"], kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("unable to decode kubeconfig: %w", err)
+	}
+
+	kubeconfig.AuthInfos[0].AuthInfo = configv1.AuthInfo{
+		TokenFile: tokenFilePath,
+	}
+	kubeconfig.Clusters[0].Cluster.Server = "https://api." + gardenResource.Spec.VirtualCluster.Dns.Domains[0].Name
+
+	virtualGardenKubeconfigRaw, err := runtime.Encode(configlatest.Codec, kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("unable to encode kubeconfig: %w", err)
+	}
+
+	return &virtualGardenClient{
+		kubeconfig: string(virtualGardenKubeconfigRaw),
+		token:      string(virtualGardenTokenSecret.Data["token"]),
+	}, nil
+}
