@@ -154,8 +154,6 @@ func run(log *slog.Logger) error {
 			log.Info("kubeconfig successfully written to kubernetes secret", "name", secretName, "namespace", namespace)
 		}
 
-		log.Info("waiting for next refresh intrerval")
-
 		return nil
 	}
 
@@ -175,12 +173,14 @@ func run(log *slog.Logger) error {
 		case <-ctx.Done():
 			log.Info("retrieved signal, exiting...")
 			return nil
-		case <-ticker.C:
+		case tick := <-ticker.C:
 			log.Info("start refreshing kubeconfig after ticker interval")
 
 			if err := refresh(); err != nil {
 				return err
 			}
+
+			log.Info("waiting for next refresh", "at", tick.Add(refreshInterval).String())
 		}
 	}
 }
