@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path"
 	"time"
 
 	"connectrpc.com/connect"
@@ -38,26 +39,10 @@ import (
 )
 
 var (
-	tokenFilePath = func() string {
-		if path := os.Getenv("TOKEN_FILE_PATH"); path != "" {
-			return path
-		}
-		return "token"
-	}()
-	kubeconfigFilePath = func() string {
-		if path := os.Getenv("KUBECONFIG_FILE_PATH"); path != "" {
-			return path
-		}
-		return "kubeconfig"
-	}()
-
-	secretName = func() string {
-		if name := os.Getenv("SECRET_NAME"); name != "" {
-			return name
-		}
-		return "virtual-garden-kubeconfig"
-	}()
-	namespace = os.Getenv("NAMESPACE")
+	tokenFilePath      = envOrDefault("TOKEN_FILE_PATH", "token")
+	kubeconfigFilePath = envOrDefault("KUBECONFIG_FILE_PATH", "kubeconfig")
+	secretName         = envOrDefault("SECRET_NAME", "virtual-garden-kubeconfig")
+	namespace          = os.Getenv("NAMESPACE")
 
 	refreshInterval = func() time.Duration {
 		if intervalRaw := os.Getenv("REFRESH_INTERVAL"); intervalRaw != "" {
@@ -71,6 +56,13 @@ var (
 		return 4 * time.Hour
 	}()
 )
+
+func envOrDefault(key, fallback string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return fallback
+}
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -98,9 +90,28 @@ func run(log *slog.Logger) error {
 			return fmt.Errorf("unable to retrieve virtual garden cluster client: %w", err)
 		}
 
-		if err := os.WriteFile(kubeconfigFilePath, []byte(vgc.kubeconfig), 0600); err != nil {
-			return fmt.Errorf("unable to write kubeconfig: %w", err)
+		for _, p := range []struct {
+			path    string
+			content string
+		}{
+			{
+				path:    kubeconfigFilePath,
+				content: vgc.kubeconfig,
+			},
+			{
+				path:    tokenFilePath,
+				content: vgc.token,
+			},
+		} {
+			if err := os.MkdirAll(path.Dir(p.path), 0600); err != nil {
+				return fmt.Errorf("unable to create directory tree: %w", err)
+			}
+
+			if err := os.WriteFile(p.path, []byte(p.content), 0600); err != nil {
+				return fmt.Errorf("unable to write file: %w", err)
+			}
 		}
+
 		if err := os.WriteFile(tokenFilePath, []byte(vgc.token), 0600); err != nil {
 			return fmt.Errorf("unable to write token: %w", err)
 		}
