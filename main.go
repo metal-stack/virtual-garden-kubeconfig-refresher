@@ -43,18 +43,6 @@ var (
 	kubeconfigFilePath = envOrDefault("KUBECONFIG_FILE_PATH", "kubeconfig")
 	secretName         = envOrDefault("SECRET_NAME", "virtual-garden-kubeconfig")
 	namespace          = os.Getenv("NAMESPACE")
-
-	refreshInterval = func() time.Duration {
-		if intervalRaw := os.Getenv("REFRESH_INTERVAL"); intervalRaw != "" {
-			d, err := time.ParseDuration(intervalRaw)
-			if err != nil {
-				panic(err)
-			}
-
-			return d
-		}
-		return 4 * time.Hour
-	}()
 )
 
 func envOrDefault(key, fallback string) string {
@@ -77,17 +65,15 @@ func run(log *slog.Logger) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
 
-	log.Info("start refreshing kubeconfig", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath, "refresh-interval", refreshInterval.String())
-
-	refresh := func() error {
+	refresh := func(withBackoff bool) (*time.Duration, error) {
 		gc, err := getGardenClusterClient(ctx, log)
 		if err != nil {
-			return fmt.Errorf("unable to retrieve garden cluster client: %w", err)
+			return nil, fmt.Errorf("unable to retrieve garden cluster client: %w", err)
 		}
 
 		vgc, err := getVirtualGardenClient(ctx, gc)
 		if err != nil {
-			return fmt.Errorf("unable to retrieve virtual garden cluster client: %w", err)
+			return nil, fmt.Errorf("unable to retrieve virtual garden cluster client: %w", err)
 		}
 
 		for _, p := range []struct {
@@ -104,34 +90,34 @@ func run(log *slog.Logger) error {
 			},
 		} {
 			if err := os.MkdirAll(path.Dir(p.path), 0600); err != nil {
-				return fmt.Errorf("unable to create directory tree: %w", err)
+				return nil, fmt.Errorf("unable to create directory tree: %w", err)
 			}
 
 			if err := os.WriteFile(p.path, []byte(p.content), 0600); err != nil {
-				return fmt.Errorf("unable to write file: %w", err)
+				return nil, fmt.Errorf("unable to write file: %w", err)
 			}
 		}
 
 		if err := os.WriteFile(tokenFilePath, []byte(vgc.token), 0600); err != nil {
-			return fmt.Errorf("unable to write token: %w", err)
+			return nil, fmt.Errorf("unable to write token: %w", err)
 		}
 
 		log.Info("written files", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath)
 
 		config, err := clientcmd.BuildConfigFromFlags("", kubeconfigFilePath)
 		if err != nil {
-			return fmt.Errorf("unable to build config: %w", err)
+			return nil, fmt.Errorf("unable to build config: %w", err)
 		}
 
 		c, err := client.New(config, client.Options{})
 		if err != nil {
-			return fmt.Errorf("unable to create virtual garden client: %w", err)
+			return nil, fmt.Errorf("unable to create virtual garden client: %w", err)
 		}
 
 		var secretList corev1.SecretList
 		err = c.List(ctx, &secretList)
 		if err != nil {
-			return fmt.Errorf("resulting kubeconfig does not work for listing secrets: %w", err)
+			return nil, fmt.Errorf("resulting kubeconfig does not work for listing secrets: %w", err)
 		}
 
 		log.Info("resulting kubeconfig works")
@@ -141,7 +127,7 @@ func run(log *slog.Logger) error {
 
 			c, err = client.New(cfg, client.Options{})
 			if err != nil {
-				return fmt.Errorf("unable to create client to write back secret: %w", err)
+				return nil, fmt.Errorf("unable to create client to write back secret: %w", err)
 			}
 
 			secret := &corev1.Secret{
@@ -159,39 +145,51 @@ func run(log *slog.Logger) error {
 				return nil
 			})
 			if err != nil {
-				return fmt.Errorf("unable to write back secret: %w", err)
+				return nil, fmt.Errorf("unable to write back secret: %w", err)
 			}
 
 			log.Info("kubeconfig successfully written to kubernetes secret", "name", secretName, "namespace", namespace)
 		}
 
-		return nil
+		timeUntilRefresh := time.Until(vgc.renew.Add(3 * time.Minute)) // give grm three minutes for renewal
+		if withBackoff && timeUntilRefresh < 5*time.Minute {
+			// prevent permanent loop in case grm has issues to renew the token
+			timeUntilRefresh = timeUntilRefresh + 5*time.Minute
+			log.Warn("backoff to reduce permanent looping")
+		}
+
+		log.Info("token renewal scheduling", "gardener-renewal-on", vgc.renew.String(), "schedule-refresh-in", timeUntilRefresh.String())
+
+		return &timeUntilRefresh, nil
 	}
 
-	if err := refresh(); err != nil {
+	log.Info("refreshing kubeconfig", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath)
+
+	next, err := refresh(false)
+	if err != nil {
 		return err
 	}
 
-	if refreshInterval == 0 {
-		log.Info("refresh interval is set to zero, task completed")
-		return nil
-	}
+	timer := time.NewTimer(*next)
 
-	ticker := time.NewTicker(refreshInterval)
+	log.Info("waiting for next timer", "in", next.String())
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Info("retrieved signal, exiting...")
 			return nil
-		case tick := <-ticker.C:
-			log.Info("start refreshing kubeconfig after ticker interval")
+		case <-timer.C:
+			log.Info("start refreshing kubeconfig after timer interval")
 
-			if err := refresh(); err != nil {
+			next, err := refresh(true)
+			if err != nil {
 				return err
 			}
 
-			log.Info("waiting for next refresh", "at", tick.Add(refreshInterval).String())
+			timer = time.NewTimer(*next)
+
+			log.Info("waiting for next timer", "in", next.String())
 		}
 	}
 }
@@ -311,6 +309,7 @@ func fromGCP(ctx context.Context) (client.Client, error) {
 type virtualGardenClient struct {
 	kubeconfig string
 	token      string
+	renew      time.Time
 }
 
 func getVirtualGardenClient(ctx context.Context, gardenClient client.Client) (*virtualGardenClient, error) {
@@ -322,7 +321,17 @@ func getVirtualGardenClient(ctx context.Context, gardenClient client.Client) (*v
 	}
 	err := gardenClient.Get(ctx, client.ObjectKeyFromObject(virtualGardenTokenSecret), virtualGardenTokenSecret)
 	if err != nil {
-		return nil, fmt.Errorf("no garden kubeconfig found for accessing virtual garden: %w", err)
+		return nil, fmt.Errorf("no garden token secret found for accessing virtual garden: %w", err)
+	}
+
+	renewRaw, ok := virtualGardenTokenSecret.Annotations["serviceaccount.resources.gardener.cloud/token-renew-timestamp"]
+	if !ok {
+		return nil, fmt.Errorf("gardener token secret has no token-renew-timestamp annotation")
+	}
+
+	renew, err := time.Parse(time.RFC3339, renewRaw)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse renew timestamp from gardener token secret: %w", err)
 	}
 
 	var genericSecrets corev1.SecretList
@@ -406,5 +415,6 @@ func getVirtualGardenClient(ctx context.Context, gardenClient client.Client) (*v
 	return &virtualGardenClient{
 		kubeconfig: string(virtualGardenKubeconfigRaw),
 		token:      string(virtualGardenTokenSecret.Data["token"]),
+		renew:      renew,
 	}, nil
 }
