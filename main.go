@@ -118,24 +118,6 @@ func (r *refresher) refresh(withBackoff bool) (*time.Duration, error) {
 		return nil, fmt.Errorf("unable to retrieve virtual garden cluster client: %w", err)
 	}
 
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("unable to build config: %w", err)
-	}
-
-	c, err := client.New(config, client.Options{})
-	if err != nil {
-		return nil, fmt.Errorf("unable to create virtual garden client: %w", err)
-	}
-
-	var secretList corev1.SecretList
-	err = c.List(r.ctx, &secretList)
-	if err != nil {
-		return nil, fmt.Errorf("resulting kubeconfig does not work for listing secrets: %w", err)
-	}
-
-	r.log.Info("resulting kubeconfig works")
-
 	for _, p := range []struct {
 		path    string
 		content string
@@ -158,11 +140,25 @@ func (r *refresher) refresh(withBackoff bool) (*time.Duration, error) {
 		}
 	}
 
-	if err := os.WriteFile(tokenFilePath, []byte(vgc.token), 0600); err != nil {
-		return nil, fmt.Errorf("unable to write token: %w", err)
+	r.log.Info("written files", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath)
+
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("unable to build config: %w", err)
 	}
 
-	r.log.Info("written files", "kubeconfig-path", kubeconfigFilePath, "token-file-path", tokenFilePath)
+	c, err := client.New(config, client.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create virtual garden client: %w", err)
+	}
+
+	var secretList corev1.SecretList
+	err = c.List(r.ctx, &secretList)
+	if err != nil {
+		return nil, fmt.Errorf("resulting kubeconfig does not work for listing secrets: %w", err)
+	}
+
+	r.log.Info("resulting kubeconfig works")
 
 	if cfg, err := rest.InClusterConfig(); err == nil {
 		r.log.Info("detected running in kubernetes, writing back secret", "name", secretName, "namespace", namespace)
