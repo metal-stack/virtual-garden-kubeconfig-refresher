@@ -210,7 +210,18 @@ func (r *refresher) getGardenClusterClient() (client.Client, error) {
 		r.log.Info("using GKE garden cluster")
 		return fromGCP(r.ctx)
 	default:
-		return nil, fmt.Errorf("either METAL_STACK_CLOUD_API_TOKEN or GOOGLE_APPLICATION_CREDENTIALS must be provided")
+		r.log.Info("attempt in-cluster kubeconfig")
+		cfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("either METAL_STACK_CLOUD_API_TOKEN or GOOGLE_APPLICATION_CREDENTIALS must be provided or in-cluster client must be constructable")
+		}
+
+		c, err := client.New(cfg, client.Options{})
+		if err != nil {
+			return nil, fmt.Errorf("unable to create in-cluster client for garden cluster access: %w", err)
+		}
+
+		return c, nil
 	}
 }
 
@@ -225,9 +236,10 @@ func fromMetalStackCloud(ctx context.Context) (client.Client, error) {
 		return nil, fmt.Errorf("METAL_STACK_CLOUD_API_TOKEN, METAL_STACK_CLOUD_PROJECT_ID and METAL_STACK_CLOUD_CLUSTER_ID must be given")
 	}
 
-	c := mscclient.New(mscclient.DialConfig{
-		BaseURL: "https://api.metalstack.cloud",
-		Token:   token,
+	c := mscclient.New(&mscclient.DialConfig{
+		BaseURL:   "https://api.metalstack.cloud",
+		Token:     token,
+		UserAgent: "virtual-garden-kubeconfig-refresher",
 	})
 
 	resp, err := c.Apiv1().Cluster().GetCredentials(ctx, connect.NewRequest(&apiv1.ClusterServiceGetCredentialsRequest{
