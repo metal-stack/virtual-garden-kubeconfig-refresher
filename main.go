@@ -203,6 +203,9 @@ func (r *refresher) refresh(withBackoff bool) (*time.Duration, error) {
 
 func (r *refresher) getGardenClusterClient() (client.Client, error) {
 	switch {
+	case os.Getenv("GARDEN_CLUSTER_TOKEN") != "":
+		r.log.Info("using token-based garden cluster access")
+		return fromToken()
 	case os.Getenv("METAL_STACK_CLOUD_API_TOKEN") != "":
 		r.log.Info("using metalstack.cloud garden cluster")
 		return fromMetalStackCloud(r.ctx)
@@ -213,7 +216,7 @@ func (r *refresher) getGardenClusterClient() (client.Client, error) {
 		r.log.Info("attempt in-cluster kubeconfig")
 		cfg, err := rest.InClusterConfig()
 		if err != nil {
-			return nil, fmt.Errorf("either METAL_STACK_CLOUD_API_TOKEN or GOOGLE_APPLICATION_CREDENTIALS must be provided or in-cluster client must be constructable")
+			return nil, fmt.Errorf("either GARDEN_TOKEN, METAL_STACK_CLOUD_API_TOKEN or GOOGLE_APPLICATION_CREDENTIALS must be provided or in-cluster client must be constructable")
 		}
 
 		c, err := client.New(cfg, client.Options{})
@@ -223,6 +226,40 @@ func (r *refresher) getGardenClusterClient() (client.Client, error) {
 
 		return c, nil
 	}
+}
+
+func fromToken() (client.Client, error) {
+	apiServer := os.Getenv("GARDEN_CLUSTER_API_SERVER")
+	token := os.Getenv("GARDEN_CLUSTER_TOKEN")
+
+	if apiServer == "" {
+		return nil, fmt.Errorf("GARDEN_CLUSTER_API_SERVER must be provided")
+	}
+	if token == "" {
+		return nil, fmt.Errorf("GARDEN_CLUSTER_TOKEN must be provided")
+	}
+
+	cfg := &rest.Config{
+		Host:        apiServer,
+		BearerToken: token,
+	}
+
+	if ca := os.Getenv("GARDEN_CLUSTER_CA_DATA"); ca != "" {
+		caBytes, err := base64.StdEncoding.DecodeString(ca)
+		if err != nil {
+			return nil, fmt.Errorf("unable to decode GARDEN_CLUSTER_CA_DATA: %w", err)
+		}
+		cfg.TLSClientConfig = rest.TLSClientConfig{
+			CAData: caBytes,
+		}
+	}
+
+	c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create client from token config: %w", err)
+	}
+
+	return c, nil
 }
 
 func fromMetalStackCloud(ctx context.Context) (client.Client, error) {
