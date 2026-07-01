@@ -1,4 +1,4 @@
-module github.com/fi-ts/virtual-garden-kubeconfig-refresher
+module github.com/metal-stack/virtual-garden-kubeconfig-refresher
 
 go 1.26.0
 

@@ -19,6 +19,6 @@ build:
 		-ldflags \
 		"$(LINKMODE)" \
 		-o bin/virtual-garden-kubeconfig-refresher \
-		github.com/fi-ts/virtual-garden-kubeconfig-refresher/...
+		github.com/metal-stack/virtual-garden-kubeconfig-refresher/...
 	strip bin/virtual-garden-kubeconfig-refresher
 	md5sum bin/virtual-garden-kubeconfig-refresher > bin/virtual-garden-kubeconfig-refresher.md5
