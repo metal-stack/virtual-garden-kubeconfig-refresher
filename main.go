@@ -234,10 +234,7 @@ func fromStaticKubeconfig() (client.Client, error) {
 		return nil, fmt.Errorf("GARDEN_CLUSTER_KUBECONFIG must be provided")
 	}
 
-	kubeconfigBytes, err := base64.StdEncoding.DecodeString(kubeconfig)
-	if err != nil {
-		return nil, fmt.Errorf("GARDEN_CLUSTER_KUBECONFIG is not valid raw kubeconfig nor base64-encoded: %w", err)
-	}
+	kubeconfigBytes := []byte(kubeconfig)
 
 	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
 	if err != nil {

@@ -6,7 +6,7 @@ The program writes the resulting kubeconfig + token file into the file system, s
 
 If an in-cluster Kubernetes client can be constructed during runtime, the program also writes the kubeconfig to a secret in a given namespace. In this case, other pods can mount this secret to gain access to the virtual garden.
 
-The Garden cluster has to be hosted at metalstack.cloud or Google, or alternatively accessed via a base64-encoded kubeconfig provided through `GARDEN_CLUSTER_KUBECONFIG`. For the metalstack.cloud and GCP options, the connected account needs permissions to retrieve cluster credentials for the referenced cluster entity. If no credentials are provided, the program attempts attempts to use an in-cluster client and checks there for the virtual-garden-access managed resource.
+The Garden cluster has to be hosted at metalstack.cloud or Google, or alternatively accessed via a Kubeconfig provided through `GARDEN_CLUSTER_KUBECONFIG`. For the metalstack.cloud and GCP options, the connected account needs permissions to retrieve cluster credentials for the referenced cluster entity. If no credentials are provided, the program attempts attempts to use an in-cluster client and checks there for the virtual-garden-access managed resource.
 
 ## Configuration
 
@@ -16,7 +16,7 @@ The Garden cluster has to be hosted at metalstack.cloud or Google, or alternativ
 | KUBECONFIG_FILE_PATH           | The path where the kubeconfig gets written to                           |
 | SECRET_NAME                    | The name of the secret to write the kubeconfig and token to             |
 | NAMESPACE                      | The namespace in which the secret resides                               |
-| GARDEN_CLUSTER_KUBECONFIG      | base64-encoded kubeconfig for the cluster hosting Gardener              |
+| GARDEN_CLUSTER_KUBECONFIG      | Kubeconfig for the cluster hosting Gardener                             |
 | METAL_STACK_CLOUD_API_TOKEN    | The metalstack.cloud API token to retrieve cluster credentials with     |
 | METAL_STACK_CLOUD_PROJECT_ID   | The metalstack.cloud project id used for retrieving cluster credentials |
 | METAL_STACK_CLOUD_CLUSTER_ID   | The metalstack.cloud cluster id used for retrieving cluster credentials |
