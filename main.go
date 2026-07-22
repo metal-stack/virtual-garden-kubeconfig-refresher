@@ -203,7 +203,7 @@ func (r *refresher) refresh(withBackoff bool) (*time.Duration, error) {
 
 func (r *refresher) getGardenClusterClient() (client.Client, error) {
 	switch {
-	case os.Getenv("GARDEN_CLUSTER_KUBECONFIG") != "":
+	case os.Getenv("STATIC_KUBECONFIG") != "":
 		r.log.Info("using static kubeconfig for garden cluster access")
 		return fromStaticKubeconfig()
 	case os.Getenv("METAL_STACK_CLOUD_API_TOKEN") != "":
@@ -216,7 +216,7 @@ func (r *refresher) getGardenClusterClient() (client.Client, error) {
 		r.log.Info("attempt in-cluster kubeconfig")
 		cfg, err := rest.InClusterConfig()
 		if err != nil {
-			return nil, fmt.Errorf("either GARDEN_CLUSTER_KUBECONFIG, METAL_STACK_CLOUD_API_TOKEN or GOOGLE_APPLICATION_CREDENTIALS must be provided or in-cluster client must be constructable")
+			return nil, fmt.Errorf("either STATIC_KUBECONFIG, METAL_STACK_CLOUD_API_TOKEN or GOOGLE_APPLICATION_CREDENTIALS must be provided or in-cluster client must be constructable")
 		}
 
 		c, err := client.New(cfg, client.Options{})
@@ -229,9 +229,9 @@ func (r *refresher) getGardenClusterClient() (client.Client, error) {
 }
 
 func fromStaticKubeconfig() (client.Client, error) {
-	kubeconfig := os.Getenv("GARDEN_CLUSTER_KUBECONFIG")
+	kubeconfig := os.Getenv("STATIC_KUBECONFIG")
 	if kubeconfig == "" {
-		return nil, fmt.Errorf("GARDEN_CLUSTER_KUBECONFIG must be provided")
+		return nil, fmt.Errorf("STATIC_KUBECONFIG must be provided")
 	}
 
 	kubeconfigBytes := []byte(kubeconfig)
