@@ -445,8 +445,13 @@ func getVirtualGardenClient(ctx context.Context, gardenClient client.Client) (*v
 		return nil, fmt.Errorf("unable to decode kubeconfig: %w", err)
 	}
 
+	tokenFile := tokenFilePath
+	if path.Dir(kubeconfigFilePath) == path.Dir(tokenFilePath) {
+		tokenFile = path.Base(tokenFilePath)
+	}
+
 	kubeconfig.AuthInfos[0].AuthInfo = configv1.AuthInfo{
-		TokenFile: tokenFilePath,
+		TokenFile: tokenFile,
 	}
 	kubeconfig.Clusters[0].Cluster.Server = "https://api." + gardenResource.Spec.VirtualCluster.Dns.Domains[0].Name
 
